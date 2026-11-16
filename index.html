@@ -157,7 +157,7 @@
         <button type="button" onclick="toggleTag(this, '台灣早餐店常見容量基準')" class="tag-btn px-2.5 py-1 rounded-full bg-white border border-slate-200 text-xs text-slate-600 hover:border-emerald-400">早餐店容量基準</button>
       </div>
 
-      <!-- AI 結果顯示區 -->
+      <!-- AI 結果 / 錯誤顯示區 -->
       <div id="ai-result-box" class="hidden mt-3 bg-white rounded-xl p-3.5 border border-emerald-200 shadow-sm"></div>
     </div>
 
@@ -673,6 +673,22 @@
       document.getElementById('image-preview-box').classList.add('hidden');
     }
 
+    async function callGeminiWithModel(modelName, apiKey, parts) {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts }],
+          generationConfig: { responseMimeType: 'application/json' }
+        })
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        throw new Error(data.error ? data.error.message : `HTTP ${res.status}`);
+      }
+      return data.candidates[0].content.parts[0].text;
+    }
+
     async function smartEstimateFood() {
       const apiKey = state.settings.apiKey.trim();
       if (!apiKey) {
@@ -702,23 +718,34 @@
         parts.push({ inlineData: { mimeType: 'image/jpeg', data: uploadedBase64 } });
       }
 
+      // 自動依序嘗試目前 Google 官方支援的模型，確保不會因單一模型下架而報錯
+      const candidateModels = [
+        'gemini-2.5-flash-lite',
+        'gemini-2.0-flash',
+        'gemini-3-flash-preview'
+      ];
+
+      let rawText = null;
+      let lastErrorMsg = '';
+
+      for (const model of candidateModels) {
+        try {
+          rawText = await callGeminiWithModel(model, apiKey, parts);
+          if (rawText) break;
+        } catch (err) {
+          lastErrorMsg = err.message;
+        }
+      }
+
       try {
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts }],
-            generationConfig: { responseMimeType: 'application/json' }
-          })
-        });
+        if (!rawText) throw new Error(lastErrorMsg || '無法連線至 Gemini 模型');
 
-        const data = await res.json();
-        if (data.error) throw new Error(data.error.message);
-
-        const rawText = data.candidates[0].content.parts[0].text;
-        const parsed = JSON.parse(rawText);
+        // 清除可能殘留的 markdown 區塊標記
+        const cleanJson = rawText.replace(/```json|```/g, '').trim();
+        const parsed = JSON.parse(cleanJson);
         lastAiEstimate = parsed;
 
+        resultBox.className = 'mt-3 bg-white rounded-xl p-3.5 border border-emerald-200 shadow-sm';
         resultBox.innerHTML = `
           <div class="flex items-start justify-between gap-2 mb-2">
             <div>
@@ -734,7 +761,13 @@
         `;
         resultBox.classList.remove('hidden');
       } catch (err) {
-        showToast('❌ 辨識失敗：' + err.message);
+        resultBox.className = 'mt-3 bg-rose-50 rounded-xl p-3.5 border border-rose-200 text-rose-700 text-xs space-y-1';
+        resultBox.innerHTML = `
+          <div class="font-bold">❌ 辨識失敗</div>
+          <div class="break-all">${escapeHtml(err.message)}</div>
+          <div class="text-[11px] text-rose-600 pt-1">提示：請確認右上角 ⚙️ 設定中的 Gemini API Key 是否正確複製且未過期。</div>
+        `;
+        resultBox.classList.remove('hidden');
       } finally {
         btn.disabled = false;
         btn.innerHTML = '🤖 AI 精算熱量';
