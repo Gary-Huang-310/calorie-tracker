@@ -231,7 +231,7 @@
       <div>
         <label class="block text-xs font-bold text-slate-700 mb-1">Gemini API Key (啟用拍照與 AI 精算必填)</label>
         <input type="password" id="setting-api-key" placeholder="貼上您的 AIzaSy... 金鑰" class="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-emerald-500" />
-        <p class="text-[11px] text-slate-400 mt-1">金鑰僅儲存在您的瀏覽器本地端 (LocalStorage)，不會上傳至任何第三方伺服器。</p>
+        <p class="text-[11px] text-slate-400 mt-1">金鑰僅儲存在您的瀏覽器本地端 (LocalStorage)，只會傳送至 Google Gemini API，且不會包含在匯出的備份檔中。</p>
       </div>
 
       <!-- 可自由調整的熱量標準線區間設定 -->
@@ -366,18 +366,65 @@
       return new Date(now - offset).toISOString().split('T')[0];
     }
 
+    const MEAL_TYPES = ['早餐', '午餐', '晚餐', '點心'];
+    const DATE_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+    // 將任意輸入轉為安全的有限數值 (非數字 / NaN / Infinity / 負數 → 0)
+    function safeNum(v, max = 100000) {
+      const n = Number(v);
+      return Number.isFinite(n) && n >= 0 ? Math.min(n, max) : 0;
+    }
+
+    // 驗證並清理 logs 結構，丟棄不合法欄位 (用於 localStorage 讀取與備份匯入)
+    function sanitizeLogs(raw) {
+      const clean = {};
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return clean;
+      for (const [date, meals] of Object.entries(raw)) {
+        if (!DATE_KEY_RE.test(date) || !Array.isArray(meals)) continue;
+        clean[date] = meals
+          .filter(m => m && typeof m === 'object')
+          .map(m => ({
+            type: MEAL_TYPES.includes(m.type) ? m.type : '點心',
+            name: String(m.name ?? '').slice(0, 100),
+            cal: safeNum(m.cal),
+            pro: safeNum(m.pro),
+            carb: safeNum(m.carb),
+            fat: safeNum(m.fat)
+          }));
+      }
+      return clean;
+    }
+
+    // 驗證並清理 settings；apiKey 僅接受字串 (匯入時另行排除)
+    function sanitizeSettings(raw, base) {
+      const s = { ...base };
+      if (!raw || typeof raw !== 'object') return s;
+      if (typeof raw.apiKey === 'string') s.apiKey = raw.apiKey.slice(0, 200);
+      for (const k of ['calGoal', 'highLimit', 'lowLimit', 'proGoal', 'carbGoal', 'fatGoal']) {
+        if (raw[k] !== undefined) {
+          const n = safeNum(raw[k], 20000);
+          if (n > 0) s[k] = n;
+        }
+      }
+      if (s.lowLimit > s.highLimit) { s.lowLimit = base.lowLimit; s.highLimit = base.highLimit; }
+      return s;
+    }
+
     function loadData() {
-      const savedLogs = localStorage.getItem('cal_tracker_logs_v2');
-      const savedSettings = localStorage.getItem('cal_tracker_settings_v2');
-      if (savedLogs) state.logs = JSON.parse(savedLogs);
-      if (savedSettings) {
-        const parsed = JSON.parse(savedSettings);
-        state.settings = {
-          ...state.settings,
-          ...parsed,
-          highLimit: parsed.highLimit !== undefined ? Number(parsed.highLimit) : 1850,
-          lowLimit: parsed.lowLimit !== undefined ? Number(parsed.lowLimit) : 1750
-        };
+      try {
+        const savedLogs = localStorage.getItem('cal_tracker_logs_v2');
+        if (savedLogs) state.logs = sanitizeLogs(JSON.parse(savedLogs));
+      } catch (err) {
+        console.error('讀取飲食紀錄失敗，資料可能已損毀', err);
+        // 保留損毀的原始資料，避免之後 saveData 把它覆寫掉
+        try { localStorage.setItem('cal_tracker_logs_v2_corrupt', localStorage.getItem('cal_tracker_logs_v2')); } catch (_) {}
+        showToast('⚠️ 本機飲食紀錄損毀，已改用空白紀錄 (原始資料已另存備份)');
+      }
+      try {
+        const savedSettings = localStorage.getItem('cal_tracker_settings_v2');
+        if (savedSettings) state.settings = sanitizeSettings(JSON.parse(savedSettings), state.settings);
+      } catch (err) {
+        console.error('讀取設定失敗', err);
       }
     }
 
@@ -531,15 +578,15 @@
         <div class="flex items-center justify-between p-3 rounded-xl bg-slate-50 border border-slate-100">
           <div>
             <div class="flex items-center gap-2">
-              <span class="px-2 py-0.5 rounded text-[11px] font-bold bg-white border border-slate-200 text-slate-600">${m.type}</span>
+              <span class="px-2 py-0.5 rounded text-[11px] font-bold bg-white border border-slate-200 text-slate-600">${escapeHtml(m.type)}</span>
               <span class="font-bold text-sm text-slate-800">${escapeHtml(m.name)}</span>
             </div>
             <div class="text-xs text-slate-500 mt-1">
-              蛋白質 ${m.pro}g • 碳水 ${m.carb}g • 脂肪 ${m.fat}g
+              蛋白質 ${safeNum(m.pro)}g • 碳水 ${safeNum(m.carb)}g • 脂肪 ${safeNum(m.fat)}g
             </div>
           </div>
           <div class="flex items-center gap-3">
-            <span class="font-extrabold text-sm text-emerald-700">${Math.round(m.cal)} kcal</span>
+            <span class="font-extrabold text-sm text-emerald-700">${Math.round(safeNum(m.cal))} kcal</span>
             <button onclick="deleteMeal(${idx})" class="text-slate-400 hover:text-rose-500 text-sm p-1">🗑️</button>
           </div>
         </div>
@@ -549,10 +596,10 @@
     function addMeal() {
       const type = document.getElementById('meal-type').value;
       const name = document.getElementById('meal-name').value.trim();
-      const cal = parseFloat(document.getElementById('meal-cal').value) || 0;
-      const pro = parseFloat(document.getElementById('meal-pro').value) || 0;
-      const carb = parseFloat(document.getElementById('meal-carb').value) || 0;
-      const fat = parseFloat(document.getElementById('meal-fat').value) || 0;
+      const cal = safeNum(document.getElementById('meal-cal').value);
+      const pro = safeNum(document.getElementById('meal-pro').value);
+      const carb = safeNum(document.getElementById('meal-carb').value);
+      const fat = safeNum(document.getElementById('meal-fat').value);
 
       if (!name) return showToast('請輸入食物名稱');
       if (!state.logs[state.currentDate]) state.logs[state.currentDate] = [];
@@ -674,9 +721,10 @@
     }
 
     async function callGeminiWithModel(modelName, apiKey, parts) {
-      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`, {
+      // API Key 放在 header 而非網址參數，避免被記錄在瀏覽器歷史 / 代理伺服器 log
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
         body: JSON.stringify({
           contents: [{ parts }],
           generationConfig: { responseMimeType: 'application/json' }
@@ -742,7 +790,16 @@
 
         // 清除可能殘留的 markdown 區塊標記
         const cleanJson = rawText.replace(/```json|```/g, '').trim();
-        const parsed = JSON.parse(cleanJson);
+        const raw = JSON.parse(cleanJson);
+        // AI 回傳內容視為不可信資料：數值強制轉型，文字於輸出時 escape
+        const parsed = {
+          name: String(raw.name ?? '').slice(0, 100),
+          note: String(raw.note ?? '').slice(0, 300),
+          calories: safeNum(raw.calories),
+          protein: safeNum(raw.protein),
+          carbs: safeNum(raw.carbs),
+          fat: safeNum(raw.fat)
+        };
         lastAiEstimate = parsed;
 
         resultBox.className = 'mt-3 bg-white rounded-xl p-3.5 border border-emerald-200 shadow-sm';
@@ -840,7 +897,10 @@
     }
 
     function exportBackup() {
-      const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+      // 備份檔不包含 API Key，避免分享或上傳備份時外洩金鑰
+      const { apiKey, ...safeSettings } = state.settings;
+      const backup = { logs: state.logs, settings: safeSettings };
+      const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -853,18 +913,32 @@
     function importBackup(event) {
       const file = event.target.files[0];
       if (!file) return;
+      if (file.size > 5 * 1024 * 1024) {
+        event.target.value = '';
+        return showToast('❌ 備份檔過大 (上限 5MB)');
+      }
       const reader = new FileReader();
       reader.onload = function(e) {
         try {
           const imported = JSON.parse(e.target.result);
-          if (imported.logs) state.logs = imported.logs;
-          if (imported.settings) state.settings = { ...state.settings, ...imported.settings };
+          if (!imported || typeof imported !== 'object' || (!imported.logs && !imported.settings)) {
+            throw new Error('invalid backup');
+          }
+          if (imported.logs && !confirm('匯入將覆蓋目前所有飲食紀錄，確定要繼續嗎？')) return;
+          if (imported.logs) state.logs = sanitizeLogs(imported.logs);
+          if (imported.settings) {
+            // 匯入檔不得覆蓋本機 API Key
+            const { apiKey, ...rest } = imported.settings;
+            state.settings = sanitizeSettings(rest, state.settings);
+          }
           saveData();
           renderAll();
           closeSettingsModal();
           showToast('✅ 備份資料已成功還原');
         } catch (err) {
           showToast('❌ 備份檔案格式錯誤');
+        } finally {
+          event.target.value = '';
         }
       };
       reader.readAsText(file);
@@ -874,10 +948,11 @@
       const meals = state.logs[state.currentDate] || [];
       if (meals.length === 0) return showToast('當日尚無紀錄可複製');
       let sum = 0;
-      const lines = meals.map(m => { sum += m.cal; return `- [${m.type}] ${m.name} (${m.cal} kcal)`; });
+      const lines = meals.map(m => { sum += safeNum(m.cal); return `- [${m.type}] ${m.name} (${safeNum(m.cal)} kcal)`; });
       const text = `📅 ${state.currentDate} 飲食日記\n${lines.join('\n')}\n🔥 總計：${Math.round(sum)} kcal`;
-      navigator.clipboard.writeText(text);
-      showToast('📋 已複製當日飲食摘要');
+      navigator.clipboard.writeText(text)
+        .then(() => showToast('📋 已複製當日飲食摘要'))
+        .catch(() => showToast('❌ 無法存取剪貼簿，請檢查瀏覽器權限'));
     }
 
     function confirmClearDay() { document.getElementById('clear-modal').classList.remove('hidden'); }
