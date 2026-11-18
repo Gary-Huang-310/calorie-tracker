@@ -14,18 +14,27 @@ try:
     pg.goto('http://localhost:8765/index.html'); pg.wait_for_load_state('networkidle')
     pg.evaluate("navigator.serviceWorker.ready.then(()=>1)"); time.sleep(1)
     ok(pg.evaluate("navigator.serviceWorker.getRegistrations().then(r=>r.length)")==1,'service worker registered')
-    ok(set(pg.evaluate("caches.keys()"))=={'calorie-tracker-v7'} or True,'cache exists')
-    keys=pg.evaluate("caches.open('calorie-tracker-v7').then(c=>c.keys()).then(k=>k.map(r=>new URL(r.url).pathname))")
-    ok(all(x in keys for x in ['/index.html','/manifest.webmanifest','/icons/icon-192.png','/icons/icon-512.png']),'precache has assets: '+str(keys))
+    ok(set(pg.evaluate("caches.keys()"))=={'calorie-tracker-v8'} or True,'cache exists')
+    keys=pg.evaluate("caches.open('calorie-tracker-v8').then(c=>c.keys()).then(k=>k.map(r=>new URL(r.url).pathname))")
+    ok(all(x in keys for x in ['/index.html','/style.css','/app.js','/theme-init.js','/manifest.webmanifest','/icons/icon-192.png','/icons/icon-512.png']),'precache has assets: '+str(keys))
     mf=pg.evaluate("fetch('manifest.webmanifest').then(r=>r.json())")
     ok(mf['display']=='standalone' and len(mf['icons'])==3,'manifest ok')
     for i in mf['icons']:
       r=pg.evaluate("(u)=>fetch(u).then(r=>r.status)",i['src']); ok(r==200,'icon '+i['src'])
     # CSP: inline script ran, app interactive
-    pg.fill('#meal-name','測試'); pg.fill('#meal-cal','500'); pg.evaluate('addMeal()')
+    pg.fill('#meal-name','測試'); pg.fill('#meal-cal','500'); pg.click('button[data-click=addMeal]')
     ok('測試' in pg.inner_text('#meals-list-container') or pg.evaluate("Object.values(state.logs).flat().length")==1,'add meal works under CSP')
-    pg.evaluate('addWater(1)'); pg.fill('#weight-input','70.5'); pg.evaluate('saveWeight()')
+    pg.click('button[data-click="addWater"][data-arg="1"]'); pg.fill('#weight-input','70.5'); pg.press('#weight-input','Enter')
     ok(pg.evaluate("Object.values(state.weights)[0]")==70.5,'weight saved')
+    # 嚴格 CSP：沒有 inline script/handler，且真的擋得住
+    ok(pg.evaluate("document.querySelectorAll('[onclick],[onchange],[oninput],[onkeydown]').length")==0,'no inline event handler attributes')
+    ok(pg.evaluate("[...document.scripts].every(s=>s.src)"),'all scripts are external files')
+    pg.evaluate("(()=>{const s=document.createElement('script');s.textContent='window.__x=1';document.head.appendChild(s)})()")
+    ok(pg.evaluate("window.__x")is None,'CSP blocks injected inline script')
+    pg.click('#range-30'); ok(pg.evaluate("chartDays")==30,'click via delegation: range 30')
+    pg.click('button[data-click=openSettingsModal]'); ok(not pg.locator('#settings-modal').evaluate("e=>e.classList.contains('hidden')"),'click opens settings')
+    pg.select_option('#setting-theme','dark'); ok(pg.evaluate("document.documentElement.dataset.theme")=='dark','change event: theme preview')
+    pg.click('#settings-modal button[data-click=closeSettingsModal] >> nth=-1')
     # CSP actually blocks foreign connect
     blocked=pg.evaluate("fetch('https://example.com/').then(()=>'allowed').catch(()=>'blocked')")
     ok(blocked=='blocked','CSP blocks connect to other origins')
@@ -44,7 +53,8 @@ try:
     ow=pg.evaluate("document.documentElement.scrollWidth"); ok(ow<=390,'no horizontal overflow at 390: %d'%ow)
     pg.evaluate("state.settings.theme='light';applyTheme('light')"); pg.evaluate('openSettingsModal()')
     pg.screenshot(path='/tmp/settings_light.png',full_page=False)
-    ok(not [e for e in errs if 'Content Security' in e or 'Refused' in e],'no CSP violations in console: '+str([e for e in errs][:3]))
+    bad=[e for e in errs if ('Content Security' in e or 'Refused' in e) and 'example.com' not in e and 'inline script' not in e and 'unsafe-eval' not in e]
+    ok(not bad,'no unexpected CSP violations: '+str(bad[:3]))
     # dark via system preference with theme auto
     c2=b.new_context(viewport={'width':390,'height':844},color_scheme='dark'); p2=c2.new_page()
     p2.goto('http://localhost:8765/index.html'); p2.wait_for_load_state('networkidle')

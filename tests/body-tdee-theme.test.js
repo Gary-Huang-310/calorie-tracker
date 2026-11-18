@@ -1,5 +1,5 @@
 const {JSDOM}=require('jsdom');const fs=require('fs');
-const html=fs.readFileSync('/home/claude/calorie-tracker/index.html','utf8');
+const html=require('./helper').html();
 const mk=(pre)=>{const dom=new JSDOM(html,{runScripts:'dangerously',url:'http://localhost/',pretendToBeVisual:true});
  const w=dom.window;w.HTMLElement.prototype.scrollIntoView=()=>{};w.confirm=()=>true;
  if(pre)pre(w);w.dispatchEvent(new w.Event('load'));return w;};

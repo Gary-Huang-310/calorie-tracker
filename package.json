@@ -1,0 +1,13 @@
+{
+  "name": "calorie-tracker",
+  "private": true,
+  "version": "1.0.0",
+  "description": "熱量與營養日記（純前端 PWA）",
+  "scripts": {
+    "test": "node tests/run-all.js",
+    "test:e2e": "python3 tests/e2e_chrome.py"
+  },
+  "devDependencies": {
+    "jsdom": "^24.0.0"
+  }
+}
